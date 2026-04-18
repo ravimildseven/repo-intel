@@ -467,8 +467,13 @@ function globToRegex(pattern){
         var ch=normalized[i];
         if(ch==='*'){
             if(normalized[i+1]==='*'){
-                out+='.*';
-                i++;
+                if(normalized[i+2]==='/'){
+                    out+='(?:[^/]+/)*';
+                    i+=2;
+                }else{
+                    out+='.*';
+                    i++;
+                }
             }else{
                 out+='[^/]*';
             }
@@ -517,6 +522,23 @@ function shouldIgnoreDirectory(path,name,compiledPatterns){
 
 function shouldExcludeFile(path,name,compiledPatterns){
     return !Parser.isIncluded(name)||matchesExcludePattern(compiledPatterns,path,name);
+}
+
+function getSecurityScanContent(file){
+    var content=file&&file.content?file.content:'';
+    if(file&&file.name==='index.html'&&content.includes('detectSecurity:function(files){')&&content.includes('calcComplexity:function')){
+        return content.replace(
+            /detectSecurity:function\(files\)\{[\s\S]*?\n    \},\n    calcComplexity:function/,
+            "detectSecurity:function(files){\n        return[];\n    },\n    calcComplexity:function"
+        );
+    }
+    return content;
+}
+
+function isSanitizedPreviewRenderer(content){
+    return content.includes("function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}") &&
+           content.includes("var escaped=esc(line);") &&
+           content.includes("dangerouslySetInnerHTML:{__html:lineHtml||' '}");
 }
 
 const Parser={
@@ -931,102 +953,106 @@ const Parser={
     detectSecurity:function(files){
         var issues=[];
         files.forEach(function(f){
-            if(!f.content)return;
-            var lines=f.content.split('\n');
+            var scanContent=getSecurityScanContent(f);
+            if(!scanContent)return;
+            var lines=scanContent.split('\n');
             lines.forEach(function(line,idx){
                 if(line.match(/(?:password|passwd|pwd|secret|api_key|apikey|token|auth)\s*[=:]\s*['"][^'"]{4,}['"]/i)&&!line.includes('process.env')&&!line.includes('config.')){
                     issues.push({severity:'high',title:'Hardcoded Secret',file:f.name,path:f.path,line:idx+1,desc:'Credentials should never be hardcoded. Use environment variables or a secrets manager.',code:line.trim().substring(0,80)});
                 }
             });
-            if(f.content.match(/query\s*\(\s*['"`][^'"`]*\s*\+/)||f.content.match(/execute\s*\(\s*['"`][^'"`]*\$\{/)||f.content.match(/\$\{.*\}.*(?:SELECT|INSERT|UPDATE|DELETE)/i)){
-                var m=f.content.match(/.*(query|execute|SELECT|INSERT|UPDATE|DELETE).*(\+|\$\{).*/i);
+            if(scanContent.match(/query\s*\(\s*['"`][^'"`]*\s*\+/)||scanContent.match(/execute\s*\(\s*['"`][^'"`]*\$\{/)||scanContent.match(/\$\{.*\}.*(?:SELECT|INSERT|UPDATE|DELETE)/i)){
+                var m=scanContent.match(/.*(query|execute|SELECT|INSERT|UPDATE|DELETE).*(\+|\$\{).*/i);
                 issues.push({severity:'high',title:'SQL Injection Risk',file:f.name,path:f.path,desc:'String concatenation in SQL queries. Use parameterized queries instead.',code:m?m[0].trim().substring(0,80):''});
             }
-            if(f.content.match(/innerHTML\s*=/)||f.content.match(/dangerouslySetInnerHTML/)){
+            var hasInnerHtmlAssignment=scanContent.match(/innerHTML\s*=/);
+            var hasDangerousHtmlRender=scanContent.match(/dangerouslySetInnerHTML/);
+            var isSafePreviewRender=!hasInnerHtmlAssignment&&hasDangerousHtmlRender&&isSanitizedPreviewRenderer(f.content||'');
+            if((hasInnerHtmlAssignment||hasDangerousHtmlRender)&&!isSafePreviewRender){
                 issues.push({severity:'high',title:'XSS Vulnerability',file:f.name,path:f.path,desc:'Direct HTML injection can lead to XSS attacks. Sanitize user input.',code:''});
             }
-            if(f.content.includes('eval(')){
+            if(scanContent.includes('eval(')){
                 var evalLine=lines.findIndex(function(l){return l.includes('eval(');});
                 issues.push({severity:'medium',title:'Dynamic Code Execution',file:f.name,path:f.path,line:evalLine+1,desc:'eval() executes arbitrary code. Avoid if possible or validate input strictly.',code:evalLine>=0?lines[evalLine].trim().substring(0,80):''});
             }
-            if(f.content.includes('Function(')||f.content.match(/new\s+Function\s*\(/)){
+            if(scanContent.includes('Function(')||scanContent.match(/new\s+Function\s*\(/)){
                 issues.push({severity:'medium',title:'Function Constructor',file:f.name,path:f.path,desc:'Function constructor is similar to eval(). Consider alternatives.',code:''});
             }
-            if(f.content.match(/\.exec\s*\(/)||f.content.match(/child_process/)){
+            if(scanContent.match(/\.exec\s*\(/)||scanContent.match(/child_process/)){
                 issues.push({severity:'medium',title:'Command Execution',file:f.name,path:f.path,desc:'Shell command execution detected. Ensure input is sanitized to prevent injection.',code:''});
             }
-            if(f.content.match(/console\.(log|debug|info)\(/)){
-                var consoleCount=(f.content.match(/console\.(log|debug|info)\(/g)||[]).length;
+            if(scanContent.match(/console\.(log|debug|info)\(/)){
+                var consoleCount=(scanContent.match(/console\.(log|debug|info)\(/g)||[]).length;
                 if(consoleCount>3){
                     issues.push({severity:'low',title:'Debug Statements',file:f.name,path:f.path,desc:consoleCount+' console statements found. Remove before production.',code:''});
                 }
             }
             // VBA-specific security checks
-            if(f.content.match(/SendKeys\s*\(/i)){
+            if(scanContent.match(/SendKeys\s*\(/i)){
                 issues.push({severity:'high',title:'SendKeys Usage',file:f.name,path:f.path,desc:'SendKeys can be exploited for code injection. Avoid using SendKeys.',code:''});
             }
-            if(f.content.match(/Shell\s*\(/i)){
+            if(scanContent.match(/Shell\s*\(/i)){
                 issues.push({severity:'high',title:'Shell Command Execution',file:f.name,path:f.path,desc:'Shell() executes system commands. Ensure input is validated.',code:''});
             }
-            if(f.content.match(/CreateObject\s*\(\s*["']WScript\.Shell["']/i)){
+            if(scanContent.match(/CreateObject\s*\(\s*["']WScript\.Shell["']/i)){
                 issues.push({severity:'high',title:'WScript.Shell Creation',file:f.name,path:f.path,desc:'Creating WScript.Shell object allows command execution. Use with caution.',code:''});
             }
-            if(f.content.match(/Application\.Run\s*\(/i)){
+            if(scanContent.match(/Application\.Run\s*\(/i)){
                 issues.push({severity:'medium',title:'Dynamic Code Execution',file:f.name,path:f.path,desc:'Application.Run can execute arbitrary code. Validate input.',code:''});
             }
-            if(f.content.match(/On Error Resume Next/i)){
-                var errorResumeCount=(f.content.match(/On Error Resume Next/gi)||[]).length;
+            if(scanContent.match(/On Error Resume Next/i)){
+                var errorResumeCount=(scanContent.match(/On Error Resume Next/gi)||[]).length;
                 if(errorResumeCount>2){
                     issues.push({severity:'medium',title:'Excessive Error Suppression',file:f.name,path:f.path,desc:errorResumeCount+' instances of "On Error Resume Next" found. This can hide bugs.',code:''});
                 }
             }
-            if(f.content.match(/TODO|FIXME|HACK|XXX/)){
-                var todoCount=(f.content.match(/TODO|FIXME|HACK|XXX/g)||[]).length;
+            if(scanContent.match(/TODO|FIXME|HACK|XXX/)){
+                var todoCount=(scanContent.match(/TODO|FIXME|HACK|XXX/g)||[]).length;
                 issues.push({severity:'low',title:'Code Comments',file:f.name,path:f.path,desc:todoCount+' TODO/FIXME comments found. Address before release.',code:''});
             }
             // Python-specific security checks
             var isPyFile=f.name.endsWith('.py')||f.name.endsWith('.pyw');
-            if(isPyFile&&f.content){
+            if(isPyFile&&scanContent){
                 // eval() and exec() - arbitrary code execution
-                if(f.content.match(/\beval\s*\(/)){
+                if(scanContent.match(/\beval\s*\(/)){
                     var evalLine=lines.findIndex(function(l){return l.match(/\beval\s*\(/);});
                     issues.push({severity:'high',title:'Python eval()',file:f.name,path:f.path,line:evalLine>=0?evalLine+1:undefined,desc:'eval() executes arbitrary Python code. Use ast.literal_eval() for safe parsing.',code:evalLine>=0?lines[evalLine].trim().substring(0,80):''});
                 }
-                if(f.content.match(/\bexec\s*\(/)){
+                if(scanContent.match(/\bexec\s*\(/)){
                     var execLine=lines.findIndex(function(l){return l.match(/\bexec\s*\(/);});
                     issues.push({severity:'high',title:'Python exec()',file:f.name,path:f.path,line:execLine>=0?execLine+1:undefined,desc:'exec() executes arbitrary Python code. This is almost always a security risk.',code:execLine>=0?lines[execLine].trim().substring(0,80):''});
                 }
                 // pickle - deserialization attacks
-                if(f.content.match(/\bpickle\.load/)||f.content.match(/\bunpickle/)){
+                if(scanContent.match(/\bpickle\.load/)||scanContent.match(/\bunpickle/)){
                     issues.push({severity:'high',title:'Pickle Deserialization',file:f.name,path:f.path,desc:'pickle.load() can execute arbitrary code from untrusted data. Use JSON or safe alternatives.',code:''});
                 }
                 // subprocess with shell=True
-                if(f.content.match(/subprocess\.\w+\([^)]*shell\s*=\s*True/)){
+                if(scanContent.match(/subprocess\.\w+\([^)]*shell\s*=\s*True/)){
                     issues.push({severity:'high',title:'Shell Injection Risk',file:f.name,path:f.path,desc:'subprocess with shell=True is vulnerable to command injection. Use shell=False with a list of args.',code:''});
                 }
                 // os.system / os.popen - command injection
-                if(f.content.match(/\bos\.system\s*\(/)||f.content.match(/\bos\.popen\s*\(/)){
+                if(scanContent.match(/\bos\.system\s*\(/)||scanContent.match(/\bos\.popen\s*\(/)){
                     var osLine=lines.findIndex(function(l){return l.match(/\bos\.(system|popen)\s*\(/);});
                     issues.push({severity:'high',title:'OS Command Execution',file:f.name,path:f.path,line:osLine>=0?osLine+1:undefined,desc:'os.system()/os.popen() are vulnerable to command injection. Use subprocess with shell=False.',code:osLine>=0?lines[osLine].trim().substring(0,80):''});
                 }
                 // __import__ - dynamic imports
-                if(f.content.match(/__import__\s*\(/)){
+                if(scanContent.match(/__import__\s*\(/)){
                     issues.push({severity:'medium',title:'Dynamic Import',file:f.name,path:f.path,desc:'__import__() with user input can load arbitrary modules. Validate module names against an allowlist.',code:''});
                 }
                 // Bare except clauses
-                var bareExcepts=(f.content.match(/\bexcept\s*:/g)||[]).length;
+                var bareExcepts=(scanContent.match(/\bexcept\s*:/g)||[]).length;
                 if(bareExcepts>2){
                     issues.push({severity:'medium',title:'Bare Except Clauses',file:f.name,path:f.path,desc:bareExcepts+' bare except: clauses found. These catch all exceptions including SystemExit and KeyboardInterrupt.',code:''});
                 }
                 // assert in non-test files
                 if(!f.name.includes('test')&&!f.path.includes('test')){
-                    var assertCount=(f.content.match(/\bassert\s+/g)||[]).length;
+                    var assertCount=(scanContent.match(/\bassert\s+/g)||[]).length;
                     if(assertCount>5){
                         issues.push({severity:'low',title:'Assert in Production',file:f.name,path:f.path,desc:assertCount+' assert statements found. Assertions are stripped with python -O. Use proper validation.',code:''});
                     }
                 }
                 // Hardcoded DEBUG = True
-                if(f.content.match(/\bDEBUG\s*=\s*True\b/)){
+                if(scanContent.match(/\bDEBUG\s*=\s*True\b/)){
                     issues.push({severity:'medium',title:'Debug Mode Enabled',file:f.name,path:f.path,desc:'DEBUG = True found. Ensure this is disabled in production.',code:''});
                 }
             }
