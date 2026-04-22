@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 
-[**Try it Now**](https://codeflow-five.vercel.app/) · [Report Bug](https://github.com/braedonsaunders/codeflow/issues) · [Request Feature](https://github.com/braedonsaunders/codeflow/issues)
+[**Report Bug**](https://github.com/ravimildseven/repo-intel/issues) · [**Request Feature**](https://github.com/ravimildseven/repo-intel/issues)
 
 <img src="./screenshot.png" alt="Repo-Intel Screenshot" width="100%"/>
 
@@ -102,17 +102,14 @@ Your GitHub token (if used) is only stored in your browser's memory and cleared 
 
 ## Quick Start
 
-### Option 1: Use Online (Recommended)
-Visit [Repo-Intel](https://codeflow-five.vercel.app/) and paste any GitHub URL.
-
-### Option 2: Self-Host / Share with Peers
+### Option 1: Self-Host / Share with Peers
 
 Repo-Intel is a **static site** — no build step, no server, no `npm install`. Serve the folder with any static file server:
 
 ```bash
 # Clone the repo
-git clone https://github.com/braedonsaunders/codeflow.git
-cd codeflow
+git clone https://github.com/ravimildseven/repo-intel.git
+cd repo-intel
 
 # Option A: Python (built-in)
 python -m http.server 8080
@@ -141,7 +138,7 @@ npx serve .
 
 All files must be in the same directory. No build artifacts, no `dist/` folder.
 
-### Option 3: Analyze Local Files
+### Option 2: Analyze Local Files
 1. Open Repo-Intel in your browser
 2. Click **📁 Open Folder**
 3. Configure exclude patterns (optional)
